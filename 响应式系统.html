@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body></body>
+  <script>
+    let activeEffect = null;
+    let bucket = new WeakMap();
+    let stackEffect = []; // 副作用函数栈
+    // 定义调度队列--利用集合进行去重
+    const jobQueue = new Set();
+    // 使用promise.resolve()创建一个promise实例，使用它将任务加入到微任务队列
+    const p = Promise.resolve();
+    // 定义一个标识是否正在刷新队列
+    let isFlushing = false;
+
+    const data = {
+      foo: 1,
+    };
+    const obj = new Proxy(data, {
+      get(target, key) {
+        track(target, key);
+        return target[key];
+      },
+      set(target, key, value) {
+        target[key] = value;
+        trigger(target, key);
+      },
+    });
+    effect(
+      () => {
+        console.log(obj.foo);
+      },
+      {
+        scheduler(fn) {
+          jobQueue.add(fn);
+          // 执行调度---因为是微任务所以再主任务完成后开始
+          flushJob();
+        },
+      }
+    );
+
+    obj.foo++;
+    obj.foo++;
+
+    function flushJob() {
+      if (isFlushing) return;
+      // 调度开始
+      isFlushing = true;
+      p.then(() => {
+        // 遍历调度队列
+        jobQueue.forEach((job) => job());
+      }).finally(() => {
+        // 调度结束
+        isFlushing = false;
+      });
+    }
+
+    function effect(fn, options = {}) {
+      const effectFn = () => {
+        // 清理副作用set与副作用函数之间的联系
+        cleanup(effectFn);
+        activeEffect = effectFn;
+        // 将副作用函数推入副作用函数栈中
+        stackEffect.push(effectFn);
+        fn();
+        // 执行完毕后将副作用函数出栈
+        stackEffect.pop();
+        // 将当前副作用函数设置为栈顶元素
+        activeEffect = stackEffect[stackEffect.length - 1];
+      };
+      // 将副作用函数配置信息存储在副作用函数中
+      effectFn.options = options;
+      effectFn.deps = [];
+      effectFn();
+    }
+    function cleanup(effectFn) {
+      for (let i = 0; i < effectFn.deps.length; i++) {
+        const defs = effectFn.deps[i];
+        defs.delete(effectFn);
+      }
+      effectFn.deps = [];
+    }
+
+    function track(traget, key) {
+      if (!activeEffect) return;
+      let depsMap = bucket.get(traget);
+      if (!depsMap) {
+        depsMap = new Map();
+        bucket.set(traget, depsMap);
+      }
+      let deps = depsMap.get(key);
+      if (!deps) {
+        deps = new Set();
+        depsMap.set(key, deps);
+      }
+      deps.add(activeEffect);
+      // 收集副作用函数所处的依赖数组
+      activeEffect.deps.push(deps);
+    }
+
+    function trigger(traget, key) {
+      let depsMap = bucket.get(traget);
+      if (!depsMap) return;
+      let effects = depsMap.get(key);
+      let effectsToRun = new Set();
+      // 当触发的副作用函数与当前正在执行的副作用函数相同时不再将其加入effectsToRun中，不触发执行
+      effects &&
+        effects.forEach((effect) => {
+          if (effect !== activeEffect) {
+            effectsToRun.add(effect);
+          }
+        });
+      // 解决无限循环问题
+      effectsToRun.forEach((effect) => {
+        // 如果存在scheduler，则执行scheduler
+        if (effect.options.scheduler) {
+          effect.options.scheduler(effect);
+        } else {
+          effect();
+        }
+      });
+    }
+    //
+  </script>
+</html>

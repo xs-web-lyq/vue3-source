@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body></body>
+  <script>
+    let activeEffect = null;
+    let bucket = new WeakMap();
+    let stackEffect = []; // 副作用函数栈
+
+    const data = {
+      foo: 1,
+      lee: 12,
+    };
+    const obj = new Proxy(data, {
+      get(target, key) {
+        track(target, key);
+        return target[key];
+      },
+      set(target, key, value) {
+        target[key] = value;
+        trigger(target, key);
+      },
+    });
+    function watch(source, cb, options = {}) {
+      // 定义一个getter
+      let getter;
+      // 当传入的第一个参数是一个函数，监控它所依赖的响应式数据进行
+      if (typeof source === "function") {
+        getter = source;
+      } else {
+        getter = () => traverse(source);
+      }
+      let oldValue, newValue;
+      // cleanup用来存储用户注册的过期回调
+      let cleanup;
+      // 定义onInvalidate函数
+      function onInvalidate(fn) {
+        // 将过期回调存储到cleanup中
+        cleanup = fn;
+      }
+
+      // 当设置立即执行参数时，immediate:ture时立即执行
+      const job = () => {
+        newValue = effectFn();
+        // 再调用回调函数cb之前，先调用过期回调
+        if (cleanup) {
+          cleanup();
+        }
+        // 当数据变化时，调用回调函数cb ---- 将onInvalidate作为回调函数的第三个参数，以便用户使用
+        cb(newValue, oldValue, onInvalidate);
+        // 使用当前新值覆盖旧值
+        oldValue = JSON.parse(JSON.stringify(newValue));
+      };
+      const effectFn = effect(() => getter(), {
+        lazy: true,
+        // 再调度和函数中判断，flush是否为’post‘如果时，将其放到微任务队列中执行
+        scheduler: () => {
+          if (options.flush == "post") {
+            const p = Promise.resolve();
+            p.then(job);
+          } else {
+            job();
+          }
+        },
+      });
+      if (options.immediate) {
+        // 当immediate为true时立即执行job，从而触发回调执行
+        job();
+      } else {
+        // 第一次执行的就是旧值--因为watch监控对象变化时才执行回调函数，所以执行副作用函数获取当前的值在下次就是旧值
+        oldValue = JSON.parse(JSON.stringify(effectFn()));
+      }
+    }
+    watch(
+      obj,
+      (newValue, oldValue) => {
+        console.log(newValue, oldValue);
+      },
+      { immediate: true }
+    );
+    setTimeout(() => {
+      obj.foo++;
+      // obj.lee++;
+    }, 1000);
+    function traverse(value, seen = new Set()) {
+      // 如果读取的数据是原始值，或者已经读取过了，那么什么都不做
+      if (typeof value != "object" || value == null || seen.has(value)) return;
+      // 将数据添加到seen中，代表遍历的读取过了，避免循环引用引起的死循环
+      seen.add(value);
+      for (const k in value) {
+        traverse(value[k], seen);
+      }
+      return value;
+    }
+    console.log("1111111111");
+    function effect(fn, options = {}) {
+      const effectFn = () => {
+        // 清理副作用set与副作用函数之间的联系
+        cleanup(effectFn);
+        activeEffect = effectFn;
+        // 将副作用函数推入副作用函数栈中
+        stackEffect.push(effectFn);
+        let res = fn();
+        // 执行完毕后将副作用函数出栈
+        stackEffect.pop();
+        // 将当前副作用函数设置为栈顶元素
+        activeEffect = stackEffect[stackEffect.length - 1];
+        return res;
+      };
+      // 将副作用函数配置信息存储在副作用函数中
+      effectFn.options = options;
+      effectFn.deps = [];
+      if (!options.lazy) {
+        effectFn();
+      }
+      return effectFn;
+    }
+    function cleanup(effectFn) {
+      for (let i = 0; i < effectFn.deps.length; i++) {
+        const defs = effectFn.deps[i];
+        defs.delete(effectFn);
+      }
+      effectFn.deps = [];
+    }
+
+    function track(traget, key) {
+      if (!activeEffect) return;
+      let depsMap = bucket.get(traget);
+      if (!depsMap) {
+        depsMap = new Map();
+        bucket.set(traget, depsMap);
+      }
+      let deps = depsMap.get(key);
+      if (!deps) {
+        deps = new Set();
+        depsMap.set(key, deps);
+      }
+      deps.add(activeEffect);
+      // 收集副作用函数所处的依赖数组
+      activeEffect.deps.push(deps);
+    }
+
+    function trigger(traget, key) {
+      let depsMap = bucket.get(traget);
+      if (!depsMap) return;
+      let effects = depsMap.get(key);
+      let effectsToRun = new Set();
+      // 当触发的副作用函数与当前正在执行的副作用函数相同时不再将其加入effectsToRun中，不触发执行
+      effects &&
+        effects.forEach((effect) => {
+          if (effect !== activeEffect) {
+            effectsToRun.add(effect);
+          }
+        });
+      // 解决无限循环问题
+      effectsToRun.forEach((effect) => {
+        // 如果存在scheduler，则执行scheduler
+        if (effect.options.scheduler) {
+          effect.options.scheduler(effect);
+        } else {
+          effect();
+        }
+      });
+    }
+    //
+  </script>
+</html>
